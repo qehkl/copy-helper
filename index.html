@@ -72,8 +72,8 @@
 
     #copySource {
       position: fixed;
-      left: -10000px;
       top: 0;
+      left: -10000px;
       width: 1px;
       height: 1px;
       padding: 0;
@@ -110,7 +110,12 @@
       const copySource = document.getElementById("copySource");
 
       const parameters = new URLSearchParams(window.location.search);
-      const shouldReturn = parameters.get("return") === "1";
+      const openedAsNewTab = window.history.length === 1;
+
+      // Extra protection: never close a tab containing previous history.
+      const shouldClose =
+        parameters.get("close") === "1" && openedAsNewTab;
+
       const encodedValue = window.location.hash.substring(1);
 
       if (!encodedValue) {
@@ -128,7 +133,7 @@
 
       copySource.value = value;
 
-      // Remove the confidential value from the current history entry.
+      // Remove the value from the visible URL and current history entry.
       window.history.replaceState(
         null,
         document.title,
@@ -136,65 +141,21 @@
       );
 
       let completed = false;
+      let automaticAttempted = false;
+      let copying = false;
 
-      function wait(milliseconds) {
-        return new Promise(function (resolve) {
-          window.setTimeout(resolve, milliseconds);
-        });
-      }
-
-      function documentIsReady() {
+      function documentIsFocused() {
         return (
           document.visibilityState === "visible" &&
           document.hasFocus()
         );
       }
 
-      function waitForFocusedDocument(timeoutMilliseconds) {
-        return new Promise(function (resolve) {
-          if (documentIsReady()) {
-            resolve(true);
-            return;
-          }
-
-          let settled = false;
-
-          function finish(result) {
-            if (settled) {
-              return;
-            }
-
-            settled = true;
-
-            window.clearTimeout(timeout);
-            window.removeEventListener("focus", check);
-            window.removeEventListener("pageshow", check);
-            document.removeEventListener("visibilitychange", check);
-
-            resolve(result);
-          }
-
-          function check() {
-            if (documentIsReady()) {
-              finish(true);
-            }
-          }
-
-          const timeout = window.setTimeout(function () {
-            finish(false);
-          }, timeoutMilliseconds);
-
-          window.addEventListener("focus", check);
-          window.addEventListener("pageshow", check);
-          document.addEventListener("visibilitychange", check);
-        });
-      }
-
       async function modernCopy() {
         if (
           !value ||
           !window.isSecureContext ||
-          !documentIsReady() ||
+          !documentIsFocused() ||
           !navigator.clipboard ||
           typeof navigator.clipboard.writeText !== "function"
         ) {
@@ -209,8 +170,8 @@
         }
       }
 
-      function trustedButtonCopy() {
-        if (!value) {
+      function legacyCopy() {
+        if (!value || !documentIsFocused()) {
           return false;
         }
 
@@ -247,7 +208,7 @@
         return commandWorked && copyEventHandled;
       }
 
-      function showFallback(message) {
+      function showCopyButton(message) {
         status.textContent =
           message ||
           "Automatic copying was blocked. Select the button below.";
@@ -262,73 +223,104 @@
         }
 
         completed = true;
-        status.textContent = "Copied. Returning…";
+        status.textContent = "Copied to clipboard.";
         copyButton.hidden = true;
 
         copySource.value = "";
         value = "";
 
-        // Briefly allow Edge/Windows to settle before navigating back.
         window.setTimeout(function () {
-          if (shouldReturn && window.history.length > 1) {
-            window.history.back();
+          if (shouldClose) {
+            // This runs only inside the newly opened helper tab.
+            window.close();
+
+            // Displayed only if Edge blocks automatic tab closing.
+            window.setTimeout(function () {
+              status.textContent =
+                "Copied. You can now close this tab.";
+            }, 300);
           } else {
-            status.textContent = "Copied to clipboard.";
+            status.textContent =
+              "Copied. You can now close this tab.";
           }
-        }, 500);
+        }, 250);
       }
 
-      async function automaticCopy() {
-        const focused = await waitForFocusedDocument(3000);
-
-        if (!focused) {
-          showFallback();
+      async function attemptAutomaticCopy() {
+        if (
+          completed ||
+          copying ||
+          automaticAttempted ||
+          !documentIsFocused()
+        ) {
           return;
         }
 
-        // Short, controlled retries only while this page remains focused.
-        const retryDelays = [0, 120, 300];
+        automaticAttempted = true;
+        copying = true;
+        status.textContent = "Copying…";
 
-        for (const delay of retryDelays) {
-          if (delay > 0) {
-            await wait(delay);
-          }
+        const modernWorked = await modernCopy();
+        const legacyWorked =
+          modernWorked ? false : legacyCopy();
 
-          if (!documentIsReady()) {
-            break;
-          }
+        copying = false;
 
-          if (await modernCopy()) {
-            finishSuccessfully();
-            return;
-          }
+        if (modernWorked || legacyWorked) {
+          finishSuccessfully();
+        } else {
+          showCopyButton();
         }
-
-        showFallback();
       }
 
       copyButton.addEventListener("click", async function () {
         status.textContent = "Copying…";
         copyButton.hidden = true;
 
-        // This runs synchronously from the user's genuine button click.
-        if (trustedButtonCopy()) {
+        // Run the synchronous method directly from the genuine click.
+        if (legacyCopy()) {
           finishSuccessfully();
           return;
         }
 
-        // Modern API fallback, still initiated by the same click.
         if (await modernCopy()) {
           finishSuccessfully();
           return;
         }
 
-        showFallback(
+        showCopyButton(
           "Clipboard access is blocked by your Edge settings."
         );
       });
 
-      void automaticCopy();
+      function checkFocusAndCopy() {
+        if (documentIsFocused()) {
+          void attemptAutomaticCopy();
+        }
+      }
+
+      window.addEventListener("focus", checkFocusAndCopy);
+      window.addEventListener("pageshow", checkFocusAndCopy);
+
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") {
+          checkFocusAndCopy();
+        }
+      });
+
+      // Give the newly opened tab one rendering frame to receive focus.
+      window.requestAnimationFrame(function () {
+        window.requestAnimationFrame(checkFocusAndCopy);
+      });
+
+      // If the browser opened it in the background, keep a manual fallback.
+      window.setTimeout(function () {
+        if (!completed && !automaticAttempted) {
+          showCopyButton(
+            "Activate this tab or select the button below to copy."
+          );
+        }
+      }, 1000);
     }());
   </script>
 </body>
