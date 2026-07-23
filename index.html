@@ -1,39 +1,133 @@
-<html>
-  <head>
-    <script>
-      window.onload = function(){
-        const url = new URL(window.location.href)
-        var text;
-        if(url.searchParams.has("copy")){
-          text = url.searchParams.get("copy")
-          bodyText = "Copied text \"" + text + "\" to the clipboard."
-          var success;
-          try {
-            navigator.clipboard.writeText(text)
-            success = true
-          } catch (e) {
-            bodyText = "Failed to set text to clipboard. Copy it manually: " + text
-            success = false
-          }
-        } else {
-          bodyText = "No \"copy\" parameter applied to URL."
-          success = false
-        }
-        
-        const textnode = document.createTextNode(bodyText);
-        document.body.appendChild(textnode);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
 
-        if(success){
-          window.setTimeout(async function(){
-            if (await navigator.clipboard.readText() == text){
-              window.close()
-            }
-          }, 1000)
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="
+      default-src 'none';
+      script-src 'unsafe-inline';
+      style-src 'unsafe-inline';
+      connect-src 'none';
+      img-src 'none';
+      font-src 'none';
+      object-src 'none';
+      base-uri 'none';
+      form-action 'none';
+    "
+  >
+
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Copy value</title>
+
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #f5f5f5;
+      color: #242424;
+    }
+
+    .panel {
+      width: min(380px, calc(100% - 40px));
+      padding: 24px;
+      box-sizing: border-box;
+      text-align: center;
+      background: #ffffff;
+      border: 1px solid #e1e1e1;
+      border-radius: 8px;
+    }
+
+    button {
+      margin-top: 16px;
+      padding: 9px 18px;
+      border: 0;
+      border-radius: 4px;
+      background: #0f6cbd;
+      color: #ffffff;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #115ea3;
+    }
+
+    button[hidden] {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="panel">
+    <div id="status" role="status" aria-live="polite">
+      Preparing to copy…
+    </div>
+
+    <button id="copyButton" type="button" hidden>
+      Copy to clipboard
+    </button>
+  </main>
+
+  <script>
+    window.addEventListener("load", async function () {
+      const status = document.getElementById("status");
+      const copyButton = document.getElementById("copyButton");
+
+      if (window.location.hash.length <= 1) {
+        status.textContent = "No value was supplied.";
+        return;
+      }
+
+      let text;
+      const encodedText = window.location.hash.substring(1);
+
+      try {
+        text = decodeURIComponent(encodedText);
+      } catch {
+        text = encodedText;
+      }
+
+      // Immediately remove the value from the visible URL
+      // and replace the current browser-history entry.
+      window.history.replaceState(
+        null,
+        document.title,
+        window.location.pathname
+      );
+
+      async function copyText() {
+        try {
+          await navigator.clipboard.writeText(text);
+
+          status.textContent = "Copied to clipboard.";
+          copyButton.hidden = true;
+
+          window.setTimeout(function () {
+            text = "";
+            window.close();
+          }, 400);
+        } catch {
+          status.textContent =
+            "Automatic copying was blocked. Select the button below.";
+
+          copyButton.hidden = false;
+          copyButton.focus();
         }
       }
-    </script>
-  </head>
-  <body>
-    
-  </body>
+
+      copyButton.addEventListener("click", copyText);
+
+      await copyText();
+    });
+  </script>
+</body>
 </html>
