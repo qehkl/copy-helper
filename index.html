@@ -109,31 +109,24 @@
       const copyButton = document.getElementById("copyButton");
       const copySource = document.getElementById("copySource");
 
-      const parameters = new URLSearchParams(window.location.search);
-      const openedAsNewTab = window.history.length === 1;
+      const encodedText = window.location.hash.substring(1);
 
-      // Extra protection: never close a tab containing previous history.
-      const shouldClose =
-        parameters.get("close") === "1" && openedAsNewTab;
-
-      const encodedValue = window.location.hash.substring(1);
-
-      if (!encodedValue) {
+      if (!encodedText) {
         status.textContent = "No value was supplied.";
         return;
       }
 
-      let value;
+      let text;
 
       try {
-        value = decodeURIComponent(encodedValue);
+        text = decodeURIComponent(encodedText);
       } catch {
-        value = encodedValue;
+        text = encodedText;
       }
 
-      copySource.value = value;
+      copySource.value = text;
 
-      // Remove the value from the visible URL and current history entry.
+      // Remove the copied value from the visible URL and browser history.
       window.history.replaceState(
         null,
         document.title,
@@ -141,21 +134,29 @@
       );
 
       let completed = false;
-      let automaticAttempted = false;
-      let copying = false;
+      let attemptRunning = false;
 
-      function documentIsFocused() {
-        return (
-          document.visibilityState === "visible" &&
-          document.hasFocus()
-        );
+      function wait(milliseconds) {
+        return new Promise(function (resolve) {
+          window.setTimeout(resolve, milliseconds);
+        });
+      }
+
+      function legacyCopy() {
+        try {
+          copySource.focus({ preventScroll: true });
+          copySource.select();
+          copySource.setSelectionRange(0, copySource.value.length);
+
+          return document.execCommand("copy");
+        } catch {
+          return false;
+        }
       }
 
       async function modernCopy() {
         if (
-          !value ||
           !window.isSecureContext ||
-          !documentIsFocused() ||
           !navigator.clipboard ||
           typeof navigator.clipboard.writeText !== "function"
         ) {
@@ -163,61 +164,14 @@
         }
 
         try {
-          await navigator.clipboard.writeText(value);
+          await navigator.clipboard.writeText(text);
           return true;
         } catch {
           return false;
         }
       }
 
-      function legacyCopy() {
-        if (!value || !documentIsFocused()) {
-          return false;
-        }
-
-        let copyEventHandled = false;
-
-        function handleCopy(event) {
-          if (!event.clipboardData) {
-            return;
-          }
-
-          event.preventDefault();
-          event.clipboardData.clearData();
-          event.clipboardData.setData("text/plain", value);
-          copyEventHandled = true;
-        }
-
-        document.addEventListener("copy", handleCopy, { once: true });
-
-        copySource.value = value;
-        copySource.focus({ preventScroll: true });
-        copySource.select();
-        copySource.setSelectionRange(0, copySource.value.length);
-
-        let commandWorked = false;
-
-        try {
-          commandWorked = document.execCommand("copy");
-        } catch {
-          commandWorked = false;
-        }
-
-        document.removeEventListener("copy", handleCopy);
-
-        return commandWorked && copyEventHandled;
-      }
-
-      function showCopyButton(message) {
-        status.textContent =
-          message ||
-          "Automatic copying was blocked. Select the button below.";
-
-        copyButton.hidden = false;
-        copyButton.focus();
-      }
-
-      function finishSuccessfully() {
+      function finish() {
         if (completed) {
           return;
         }
@@ -227,100 +181,78 @@
         copyButton.hidden = true;
 
         copySource.value = "";
-        value = "";
+        text = "";
 
+        // Brief delay lets Edge finish committing the clipboard operation.
         window.setTimeout(function () {
-          if (shouldClose) {
-            // This runs only inside the newly opened helper tab.
-            window.close();
-
-            // Displayed only if Edge blocks automatic tab closing.
-            window.setTimeout(function () {
-              status.textContent =
-                "Copied. You can now close this tab.";
-            }, 300);
-          } else {
-            status.textContent =
-              "Copied. You can now close this tab.";
-          }
-        }, 250);
+          window.close();
+        }, 350);
       }
 
-      async function attemptAutomaticCopy() {
-        if (
-          completed ||
-          copying ||
-          automaticAttempted ||
-          !documentIsFocused()
-        ) {
-          return;
+      async function attemptCopy() {
+        if (completed || attemptRunning || !text) {
+          return false;
         }
 
-        automaticAttempted = true;
-        copying = true;
-        status.textContent = "Copying…";
+        attemptRunning = true;
 
         const modernWorked = await modernCopy();
-        const legacyWorked =
-          modernWorked ? false : legacyCopy();
+        const legacyWorked = modernWorked ? false : legacyCopy();
 
-        copying = false;
+        attemptRunning = false;
 
         if (modernWorked || legacyWorked) {
-          finishSuccessfully();
-        } else {
-          showCopyButton();
+          finish();
+          return true;
         }
+
+        return false;
+      }
+
+      async function automaticCopy() {
+        const retryDelays = [0, 100, 300];
+
+        for (const delay of retryDelays) {
+          if (delay > 0) {
+            await wait(delay);
+          }
+
+          if (await attemptCopy()) {
+            return;
+          }
+        }
+
+        status.textContent =
+          "Automatic copying was blocked. Select the button below.";
+
+        copyButton.hidden = false;
+        copyButton.focus();
       }
 
       copyButton.addEventListener("click", async function () {
         status.textContent = "Copying…";
-        copyButton.hidden = true;
 
-        // Run the synchronous method directly from the genuine click.
-        if (legacyCopy()) {
-          finishSuccessfully();
-          return;
-        }
+        // Run both methods directly from the user's click.
+        const legacyWorked = legacyCopy();
+        const modernWorked = await modernCopy();
 
-        if (await modernCopy()) {
-          finishSuccessfully();
-          return;
-        }
-
-        showCopyButton(
-          "Clipboard access is blocked by your Edge settings."
-        );
-      });
-
-      function checkFocusAndCopy() {
-        if (documentIsFocused()) {
-          void attemptAutomaticCopy();
-        }
-      }
-
-      window.addEventListener("focus", checkFocusAndCopy);
-      window.addEventListener("pageshow", checkFocusAndCopy);
-
-      document.addEventListener("visibilitychange", function () {
-        if (document.visibilityState === "visible") {
-          checkFocusAndCopy();
+        if (legacyWorked || modernWorked) {
+          finish();
+        } else {
+          status.textContent =
+            "Clipboard access is blocked by your browser settings.";
+          copyButton.hidden = false;
         }
       });
 
-      // Give the newly opened tab one rendering frame to receive focus.
-      window.requestAnimationFrame(function () {
-        window.requestAnimationFrame(checkFocusAndCopy);
+      // Retry when the new tab becomes focused.
+      window.addEventListener("focus", function () {
+        if (!completed) {
+          void attemptCopy();
+        }
       });
 
-      // If the browser opened it in the background, keep a manual fallback.
-      window.setTimeout(function () {
-        if (!completed && !automaticAttempted) {
-          showCopyButton(
-            "Activate this tab or select the button below to copy."
-          );
-        }
-      }, 1000);
+      void automaticCopy();
     }());
   </script>
 </body>
