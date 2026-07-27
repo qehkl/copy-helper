@@ -41,7 +41,7 @@
     }
 
     .panel {
-      width: min(400px, 100%);
+      width: min(420px, 100%);
       padding: 24px;
       text-align: center;
       background: #ffffff;
@@ -69,6 +69,7 @@
     #status {
       margin: 0;
       font-size: 14px;
+      line-height: 20px;
     }
 
     button {
@@ -86,19 +87,41 @@
       background: #115ea3;
     }
 
-    input {
+    button:focus-visible {
+      outline: 2px solid #242424;
+      outline-offset: 2px;
+    }
+
+    button:disabled {
+      cursor: default;
+      opacity: 0.65;
+    }
+
+    textarea {
       width: 100%;
+      min-height: 70px;
       margin-top: 16px;
       padding: 9px;
+      resize: vertical;
       border: 1px solid #a8a8a8;
       border-radius: 4px;
+      background: #ffffff;
+      color: #242424;
       font: inherit;
+      line-height: 20px;
+      overflow-wrap: anywhere;
+    }
+
+    textarea:focus {
+      border-color: #0f6cbd;
+      outline: 2px solid rgba(15, 108, 189, 0.2);
     }
 
     .help {
       margin: 8px 0 0;
       color: #616161;
       font-size: 12px;
+      line-height: 17px;
     }
 
     [hidden] {
@@ -112,25 +135,25 @@
     <div id="spinner" class="spinner" aria-hidden="true"></div>
 
     <p id="status" role="status" aria-live="polite">
-      Copying…
+      Preparing to copy…
     </p>
 
     <button id="copyButton" type="button" hidden>
       Copy now
     </button>
 
-    <input
+    <textarea
       id="manualValue"
-      type="text"
+      rows="3"
       readonly
       autocomplete="off"
       spellcheck="false"
       aria-label="Value to copy"
       hidden
-    >
+    ></textarea>
 
     <p id="manualHelp" class="help" hidden>
-      If copying is restricted, select the value above and press Ctrl+C.
+      If Edge still blocks clipboard access, click the value above and press Ctrl+C.
     </p>
   </main>
 
@@ -145,15 +168,25 @@
       const manualHelp = document.getElementById("manualHelp");
 
       const encodedValue = window.location.hash.substring(1);
-      let value = "";
+      const valueWasSupplied = encodedValue.length > 0;
 
-      try {
-        value = decodeURIComponent(encodedValue);
-      } catch {
-        value = encodedValue;
+      let value = "";
+      let copying = false;
+      let completed = false;
+
+      if (valueWasSupplied) {
+        try {
+          value = decodeURIComponent(encodedValue);
+        } catch {
+          // Preserve the original value if it was not valid URI encoding.
+          value = encodedValue;
+        }
       }
 
-      // Remove the confidential value from the visible URL and history entry.
+      /*
+       * Remove the value from the visible URL and current history entry.
+       * The value remains available only in this page's memory.
+       */
       try {
         window.history.replaceState(
           null,
@@ -161,54 +194,260 @@
           window.location.pathname + window.location.search
         );
       } catch {
-        // Continue even if history modification is unavailable.
+        // The page can continue safely if history replacement is unavailable.
       }
 
-      let copying = false;
-      let completed = false;
+      function isActiveDocument() {
+        return (
+          document.visibilityState === "visible" &&
+          document.hasFocus()
+        );
+      }
 
+      function focusSafely(element) {
+        try {
+          element.focus({ preventScroll: true });
+        } catch {
+          try {
+            element.focus();
+          } catch {
+            // Continue if focus cannot be changed.
+          }
+        }
+      }
+
+      function selectManualValue() {
+        if (manualValue.hidden) {
+          return;
+        }
+
+        if (document.activeElement !== manualValue) {
+          focusSafely(manualValue);
+        }
+
+        try {
+          manualValue.select();
+          manualValue.setSelectionRange(
+            0,
+            manualValue.value.length
+          );
+        } catch {
+          // The user can still select the text manually.
+        }
+      }
+
+      /*
+       * Wait for the new tab to become visible and focused.
+       * A strict timeout prevents the page remaining on a spinner.
+       */
+      function waitForActiveDocument(timeoutMilliseconds) {
+        return new Promise(function (resolve) {
+          let settled = false;
+          let focusTimer = 0;
+          let timeoutTimer = 0;
+
+          function cleanup() {
+            window.clearTimeout(focusTimer);
+            window.clearTimeout(timeoutTimer);
+
+            window.removeEventListener("focus", check);
+            window.removeEventListener("pageshow", check);
+
+            document.removeEventListener(
+              "visibilitychange",
+              check
+            );
+          }
+
+          function finish(result) {
+            if (settled) {
+              return;
+            }
+
+            settled = true;
+            cleanup();
+            resolve(result);
+          }
+
+          function check() {
+            if (!isActiveDocument()) {
+              return;
+            }
+
+            window.clearTimeout(focusTimer);
+
+            /*
+             * Give Edge enough time to finish activating and painting
+             * the newly opened tab.
+             */
+            focusTimer = window.setTimeout(function () {
+              if (isActiveDocument()) {
+                finish(true);
+              }
+            }, 60);
+          }
+
+          window.addEventListener("focus", check);
+          window.addEventListener("pageshow", check);
+
+          document.addEventListener(
+            "visibilitychange",
+            check
+          );
+
+          timeoutTimer = window.setTimeout(function () {
+            finish(false);
+          }, timeoutMilliseconds);
+
+          check();
+        });
+      }
+
+      /*
+       * Use the current Clipboard API, but place a strict time limit
+       * around it in case Edge leaves the permission request pending.
+       */
+      async function modernCopy(
+        text,
+        timeoutMilliseconds
+      ) {
+        let timeoutTimer = 0;
+
+        try {
+          if (
+            !isActiveDocument() ||
+            !window.isSecureContext ||
+            !navigator.clipboard ||
+            typeof navigator.clipboard.writeText !== "function"
+          ) {
+            return false;
+          }
+
+          const writeResult =
+            navigator.clipboard.writeText(text).then(
+              function () {
+                return true;
+              },
+              function () {
+                return false;
+              }
+            );
+
+          const timeoutResult = new Promise(function (resolve) {
+            timeoutTimer = window.setTimeout(function () {
+              resolve(false);
+            }, timeoutMilliseconds);
+          });
+
+          return await Promise.race([
+            writeResult,
+            timeoutResult
+          ]);
+        } catch {
+          return false;
+        } finally {
+          window.clearTimeout(timeoutTimer);
+        }
+      }
+
+      /*
+       * Legacy copy is retained because it is often allowed when
+       * executed directly from a trusted button click.
+       */
       function legacyCopy(text) {
-        const textarea = document.createElement("textarea");
+        if (!isActiveDocument()) {
+          return false;
+        }
 
-        textarea.value = text;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.left = "-9999px";
-        textarea.style.top = "0";
-        textarea.style.opacity = "0";
+        const temporaryValue =
+          document.createElement("textarea");
 
-        document.body.appendChild(textarea);
+        temporaryValue.value = text;
+        temporaryValue.readOnly = true;
+        temporaryValue.tabIndex = -1;
+        temporaryValue.setAttribute("aria-hidden", "true");
 
-        textarea.focus({ preventScroll: true });
-        textarea.select();
-        textarea.setSelectionRange(0, textarea.value.length);
+        temporaryValue.style.position = "fixed";
+        temporaryValue.style.top = "0";
+        temporaryValue.style.left = "0";
+        temporaryValue.style.width = "2px";
+        temporaryValue.style.height = "2px";
+        temporaryValue.style.padding = "0";
+        temporaryValue.style.border = "0";
+        temporaryValue.style.opacity = "0.01";
+        temporaryValue.style.pointerEvents = "none";
+
+        document.body.appendChild(temporaryValue);
 
         let successful = false;
 
         try {
-          successful = document.execCommand("copy");
+          focusSafely(temporaryValue);
+
+          temporaryValue.select();
+          temporaryValue.setSelectionRange(
+            0,
+            temporaryValue.value.length
+          );
+
+          successful =
+            document.execCommand("copy") === true;
         } catch {
           successful = false;
+        } finally {
+          temporaryValue.remove();
         }
 
-        textarea.remove();
         return successful;
       }
 
-      function showFallback() {
+      function setCopyingState() {
+        copying = true;
+
+        spinner.hidden = false;
+        status.textContent = "Copying…";
+
+        copyButton.disabled = true;
+        copyButton.hidden = true;
+
+        manualValue.hidden = true;
+        manualHelp.hidden = true;
+      }
+
+      function showFallback(buttonAttemptFailed) {
+        if (completed) {
+          return;
+        }
+
         copying = false;
+
         spinner.hidden = true;
 
-        status.textContent =
-          "Edge blocked automatic copying. Select Copy now.";
-
+        copyButton.disabled = false;
         copyButton.hidden = false;
 
         manualValue.value = value;
         manualValue.hidden = false;
         manualHelp.hidden = false;
 
-        copyButton.focus();
+        if (buttonAttemptFailed) {
+          status.textContent =
+            "Clipboard access is restricted. The value is selected—press Ctrl+C.";
+
+          window.setTimeout(selectManualValue, 0);
+        } else {
+          status.textContent =
+            "Automatic copying was blocked. Select Copy now.";
+
+          window.setTimeout(function () {
+            focusSafely(copyButton);
+          }, 0);
+        }
+      }
+
+      function clearSensitiveValue() {
+        value = "";
+        manualValue.value = "";
       }
 
       function copySucceeded() {
@@ -222,102 +461,151 @@
         spinner.hidden = true;
         status.textContent = "Copied to clipboard.";
 
+        copyButton.disabled = true;
         copyButton.hidden = true;
+
         manualValue.hidden = true;
         manualHelp.hidden = true;
-        manualValue.value = "";
 
-        // Clear the retained value before leaving.
-        value = "";
+        clearSensitiveValue();
 
-        // This is only reached after copying has completed.
-        window.close();
+        /*
+         * This should work because the page was opened from the
+         * Microsoft Lists link. If Edge refuses to close it, the
+         * completed message remains visible.
+         */
+        try {
+          window.close();
+        } catch {
+          // Show the completed message if closing is restricted.
+        }
 
-        // Shown only if Edge prevents automatic tab closing.
         window.setTimeout(function () {
           status.textContent =
             "Copied to clipboard. You can close this tab.";
-        }, 100);
+        }, 150);
       }
 
-      function copyValue() {
-        if (copying || completed || value === "") {
+      async function runAutomaticCopy() {
+        const documentIsReady =
+          await waitForActiveDocument(1800);
+
+        if (completed) {
           return;
         }
 
-        copying = true;
-        spinner.hidden = false;
-        status.textContent = "Copying…";
-        copyButton.hidden = true;
-
-        try {
-          window.focus();
-        } catch {
-          // Continue if focus cannot be requested.
+        if (!documentIsReady) {
+          showFallback(false);
+          return;
         }
 
-        let clipboardPromise = null;
+        setCopyingState();
 
-        // Start the modern clipboard request immediately.
-        try {
-          if (
-            window.isSecureContext &&
-            navigator.clipboard &&
-            typeof navigator.clipboard.writeText === "function"
-          ) {
-            clipboardPromise = navigator.clipboard.writeText(value);
-          }
-        } catch {
-          clipboardPromise = null;
+        /*
+         * Make only one Clipboard API request at a time.
+         * The original version started two competing copy operations.
+         */
+        const modernSucceeded =
+          await modernCopy(value, 1600);
+
+        if (completed) {
+          return;
         }
 
-        // Also attempt the synchronous Edge/Chromium fallback.
-        const legacySucceeded = legacyCopy(value);
-
-        if (legacySucceeded) {
-          if (clipboardPromise) {
-            clipboardPromise.catch(function () {
-              // The synchronous copy has already succeeded.
-            });
-          }
-
+        if (modernSucceeded) {
           copySucceeded();
           return;
         }
 
-        if (clipboardPromise) {
-          clipboardPromise.then(
-            copySucceeded,
-            showFallback
-          );
-        } else {
-          showFallback();
+        /*
+         * Try the older synchronous method only after the modern
+         * request has conclusively failed or timed out.
+         */
+        if (
+          isActiveDocument() &&
+          legacyCopy(value)
+        ) {
+          copySucceeded();
+          return;
         }
+
+        showFallback(false);
       }
 
-      copyButton.addEventListener("click", copyValue);
+      copyButton.addEventListener("click", function () {
+        if (copying || completed || !valueWasSupplied) {
+          return;
+        }
 
-      manualValue.addEventListener("click", function () {
-        manualValue.select();
+        setCopyingState();
+
+        /*
+         * During a real button click, try the synchronous method
+         * first so it executes inside Edge's trusted click event.
+         */
+        if (legacyCopy(value)) {
+          copySucceeded();
+          return;
+        }
+
+        /*
+         * This call begins immediately inside the same trusted
+         * click event, even though its result is asynchronous.
+         */
+        modernCopy(value, 2000).then(
+          function (successful) {
+            if (successful) {
+              copySucceeded();
+            } else {
+              showFallback(true);
+            }
+          },
+          function () {
+            showFallback(true);
+          }
+        );
       });
 
       manualValue.addEventListener("focus", function () {
-        manualValue.select();
+        window.setTimeout(selectManualValue, 0);
       });
 
-      window.addEventListener("pagehide", function () {
-        value = "";
-        manualValue.value = "";
+      manualValue.addEventListener(
+        "click",
+        selectManualValue
+      );
+
+      /*
+       * When the user performs a native Ctrl+C operation, allow it
+       * to complete before clearing the value and closing the tab.
+       */
+      manualValue.addEventListener("copy", function (event) {
+        if (!event.isTrusted || completed) {
+          return;
+        }
+
+        window.setTimeout(copySucceeded, 0);
       });
 
-      if (value === "") {
+      window.addEventListener(
+        "pagehide",
+        clearSensitiveValue,
+        { once: true }
+      );
+
+      if (!valueWasSupplied) {
         spinner.hidden = true;
         status.textContent = "No value was supplied.";
         return;
       }
 
-      // Start immediately—not on window.onload.
-      copyValue();
+      /*
+       * Any unexpected failure now leads to the visible fallback
+       * instead of leaving the page permanently spinning.
+       */
+      runAutomaticCopy().catch(function () {
+        showFallback(false);
+      });
     })();
   </script>
 </body>
